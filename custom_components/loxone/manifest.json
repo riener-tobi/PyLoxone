@@ -1,12 +1,12 @@
 {
   "domain": "loxone",
   "name": "PyLoxone",
-  "codeowners": ["@JoDehli"],
+  "codeowners": ["@riener-tobi"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/JoDehli/PyLoxone",
+  "documentation": "https://github.com/riener-tobi/PyLoxone",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/JoDehli/PyLoxone/issues",
+  "issue_tracker": "https://github.com/riener-tobi/PyLoxone/issues",
   "requirements": [
     "websockets>=14",
     "pycryptodome",
