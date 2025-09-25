@@ -11,6 +11,7 @@ Improvements:
 - more extra_state_attributes for debugging
 - defensive handling of missing state uuids / values
 - consistent temperature steps per device type
+- min/max temperatures mapped from frostProtection / heatProtection (fallback 5/35 °C)
 """
 
 from __future__ import annotations
@@ -45,9 +46,9 @@ OPMODES = {
     0: HVACMode.AUTO,       # Auto
     1: HVACMode.AUTO,
     2: HVACMode.AUTO,
-    3: HVACMode.HEAT_COOL, # Fixwert Auto/Heating/Cooling
-    4: HVACMode.HEAT,      # Fixwert Heizen
-    5: HVACMode.COOL,      # Fixwert Kühlen
+    3: HVACMode.HEAT_COOL,  # Fixwert Auto/Heating/Cooling
+    4: HVACMode.HEAT,       # Fixwert Heizen
+    5: HVACMode.COOL,       # Fixwert Kühlen
 }
 
 OPMODETOLOXONE = {
@@ -147,6 +148,8 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
             "isCooling",
             "prepareState",
             "overrideEntries",
+            "frostProtection",
+            "heatProtection",
         ]
         for k in keys:
             val = self.get_state_value(k)
@@ -198,6 +201,24 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         return 0.5
 
     @property
+    def min_temp(self) -> float:
+        """Map frostProtectTemperature as min temperature."""
+        val = self.get_state_value("frostProtectTemperature")
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return 5.0  # Fallback Frostschutz
+
+    @property
+    def max_temp(self) -> float:
+        """Map heatProtectTemperature as max temperature."""
+        val = self.get_state_value("heatProtectTemperature")
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return 35.0  # Fallback Max Heizen
+
+    @property
     def temperature_unit(self) -> str:
         format_str = self.details.get("format")
         if not format_str:
@@ -208,25 +229,20 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
 
     @property
     def hvac_modes(self) -> List[HVACMode]:
-        """Return supported hvac modes including OFF."""
         return [HVACMode.AUTO, HVACMode.HEAT_COOL, HVACMode.HEAT, HVACMode.COOL, HVACMode.OFF]
 
     @property
     def hvac_mode(self) -> Optional[HVACMode]:
-        """Return current HVAC mode, handling -1 for OFF."""
         op = self.get_state_value("operatingMode")
         return OPMODES.get(op, HVACMode.OFF)
 
     def set_hvac_mode(self, hvac_mode: str) -> None:
-        """Set HVAC mode, including OFF (-1)."""
         try:
-            target_mode = OPMODETOLOXONE.get(hvac_mode)
+            target_mode = self._autoMode if hvac_mode == HVACMode.AUTO else OPMODETOLOXONE.get(hvac_mode)
             if target_mode is None:
-                _LOGGER.warning("%s: unsupported hvac_mode %s", self.entity_id, hvac_mode)
                 return
             payload = f"setOperatingMode/{target_mode}"
             self.hass.bus.fire(SENDDOMAIN, dict(uuid=self.uuidAction, value=payload))
-            _LOGGER.debug("%s: set_hvac_mode fired %s", self.entity_id, payload)
             self.schedule_update_ha_state()
         except Exception as exc:
             _LOGGER.exception("%s: error in set_hvac_mode: %s", self.entity_id, exc)
@@ -244,12 +260,6 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         return None
 
     def set_temperature(self, **kwargs: Any) -> None:
-        """Set a new target temperature.
-
-        Behavior:
-        - If currently in AUTO (-1 excluded), switch to manual Fixwert HEAT (4)
-        - Then set temperature using setManualTemperature/<value>
-        """
         temp = kwargs.get("temperature") or kwargs.get("target_temp")
         if temp is None:
             _LOGGER.debug("%s: set_temperature called without temperature", self.entity_id)
@@ -257,28 +267,15 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         try:
             op = self.get_state_value("operatingMode")
             if op is None or int(op) <= 2:
-                # Currently in AUTO → switch to manual HEAT (4)
                 payload_mode = "setOperatingMode/4"
                 self.hass.bus.fire(SENDDOMAIN, dict(uuid=self.uuidAction, value=payload_mode))
                 _LOGGER.debug("%s: switched from AUTO to manual HEAT mode", self.entity_id)
 
-            # Set manual temperature
             payload_temp = f"setManualTemperature/{temp}"
             self.hass.bus.fire(SENDDOMAIN, dict(uuid=self.uuidAction, value=payload_temp))
             _LOGGER.debug("%s: set_temperature fired %s", self.entity_id, payload_temp)
         except Exception as exc:
             _LOGGER.exception("%s: error in set_temperature: %s", self.entity_id, exc)
-
-    def set_hvac_mode(self, hvac_mode: str) -> None:
-        try:
-            target_mode = self._autoMode if hvac_mode == HVACMode.AUTO else OPMODETOLOXONE.get(hvac_mode)
-            if target_mode is None:
-                return
-            payload = f"setOperatingMode/{target_mode}"
-            self.hass.bus.fire(SENDDOMAIN, dict(uuid=self.uuidAction, value=payload))
-            self.schedule_update_ha_state()
-        except Exception as exc:
-            _LOGGER.exception("%s: error in set_hvac_mode: %s", self.entity_id, exc)
 
     def set_preset_mode(self, preset_mode: str) -> None:
         try:
