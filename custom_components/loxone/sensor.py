@@ -7,6 +7,7 @@ https://github.com/JoDehli/PyLoxone
 
 import logging
 import re
+import json
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -178,6 +179,11 @@ async def async_setup_entry(
     for sensor in get_all(loxconfig, "TextInput"):
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
         entities.append(LoxoneTextSensor(**sensor))
+
+    # Add TextStatus sensors
+    for sensor in get_all(loxconfig, "TextState"):
+        sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
+        entities.append(LoxoneTextStatusSensor(**sensor))
 
     @callback
     def async_add_sensors(_):
@@ -360,3 +366,175 @@ class LoxoneSensor(LoxoneEntity, SensorEntity):
             "platform": "loxone",
             "category": self.cat,
         }
+
+
+class LoxoneTextStatusSensor(LoxoneEntity, SensorEntity):
+    """Representation of a Loxone TextStatus sensor."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._state = STATE_UNKNOWN
+        self._icon = None
+        self._color = None
+        
+        # Get state UUIDs from control configuration
+        self._state_uuid_text = self.states["textAndIcon"]
+        self._state_uuid_icon = self.states.get("iconAndColor")
+        
+        self._attr_should_poll = False
+        self._attr_device_class = None
+        self._attr_native_unit_of_measurement = None
+
+        # Device Info für bessere Integration
+        self._attr_device_info = get_or_create_device(
+            self.uuidAction, self.name, "TextStatus", self.room
+        )
+
+    @cached_property
+    def unique_id(self) -> str:
+        """Return a unique ID."""
+        return self.uuidAction
+
+    @cached_property 
+    def name(self):
+        """Return the name of the sensor."""
+        return self._attr_name
+
+    async def event_handler(self, e):
+        """Handle state updates for TextStatus sensor."""
+        if not e.data:
+            return
+            
+        update_required = False
+        
+        # Handle text state updates - direkter String
+        if self._state_uuid_text in e.data:
+            data = e.data[self._state_uuid_text]
+            
+            # Text ist ein direkter String, kein Dictionary
+            if isinstance(data, str) and data != self._state:
+                self._state = data
+                update_required = True
+        
+        # Handle icon state updates - JSON String
+        if self._state_uuid_icon and self._state_uuid_icon in e.data:
+            data = e.data[self._state_uuid_icon]
+            new_icon, new_color = self._parse_icon_state(data)
+            
+            if new_icon != self._icon or new_color != self._color:
+                self._icon = new_icon
+                self._color = new_color
+                update_required = True
+        
+        if update_required:
+            self.async_schedule_update_ha_state()
+
+    def _parse_icon_state(self, data):
+        """Parse the icon and color data from JSON string."""
+        icon = "mdi:text"
+        color = None
+
+        if isinstance(data, str):
+            try:
+                # Entferne eventuelle doppelte Anführungszeichen
+                clean_data = data.strip('"')
+                parsed = json.loads(clean_data)
+                
+                if isinstance(parsed, dict):
+                    # Extrahiere Icon und Color aus dem JSON
+                    icon = parsed.get("icon", icon)
+                    color = parsed.get("color")
+                    
+                    # Konvertiere Loxone Icons zu MDI Icons falls nötig
+                    icon = self._convert_loxone_icon(icon)
+                    
+            except json.JSONDecodeError:
+                # Fallback auf Standard-Icon bei Parse-Fehlern
+                pass
+        
+        return icon, color
+
+    def _convert_loxone_icon(self, loxone_icon):
+        """Convert Loxone icon paths to MDI icons."""
+        if not loxone_icon:
+            return "mdi:text"
+            
+        # Entferne Pfad und behalte nur den Dateinamen ohne Extension
+        icon_name = loxone_icon.split('/')[-1].replace('.svg', '').lower()
+        
+        # Mapping von Loxone Icons zu MDI Icons
+        icon_mapping = {
+            "radiator": "mdi:radiator",
+            "flame": "mdi:fire",
+            "snowflake": "mdi:snowflake",
+            "thermometer": "mdi:thermometer",
+            "water": "mdi:water",
+            "fan": "mdi:fan",
+            "power": "mdi:power-plug",
+            "light": "mdi:lightbulb",
+            "window": "mdi:window-open",
+            "door": "mdi:door",
+            "information": "mdi:information",
+            "warning": "mdi:alert",
+            "error": "mdi:alert-circle",
+            "success": "mdi:check-circle",
+            "settings": "mdi:cog",
+        }
+        
+        return icon_mapping.get(icon_name, "mdi:text")
+
+    @property
+    def native_value(self):
+        """Return the state of the sensor."""
+        return self._state
+
+    @property
+    def icon(self):
+        """Return the icon to use in the frontend."""
+        return self._icon or "mdi:text"
+
+    @property
+    def extra_state_attributes(self):
+        """Return device specific state attributes."""
+        attrs = {
+            "uuid": self.uuidAction,
+            "device_type": "TextStatus",
+            "platform": "loxone",
+            "category": self.cat,
+            "room": self.room,
+        }
+        
+        if self._color:
+            attrs["color"] = self._color
+            
+        return attrs
+
+    async def async_added_to_hass(self):
+        """Run when entity is about to be added to hass."""
+        await super().async_added_to_hass()
+        
+        # Initial state from miniserver
+        await self._update_initial_state()
+
+    async def _update_initial_state(self):
+        """Update initial state from miniserver."""
+        miniserver = get_miniserver_from_hass(self.hass)
+        
+        # Text state
+        try:
+            initial_text = miniserver.get_state_by_uuid(self._state_uuid_text)
+            if initial_text is not None and isinstance(initial_text, str):
+                self._state = initial_text
+        except Exception:
+            pass
+            
+        # Icon state
+        if self._state_uuid_icon:
+            try:
+                initial_icon = miniserver.get_state_by_uuid(self._state_uuid_icon)
+                if initial_icon is not None:
+                    self._icon, self._color = self._parse_icon_state(initial_icon)
+            except Exception:
+                pass
+
+        self.async_schedule_update_ha_state()
