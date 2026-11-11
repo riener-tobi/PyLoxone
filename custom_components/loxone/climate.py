@@ -494,6 +494,8 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         co2 = self._positive_value("co2", 10000)
         if co2 is not None:
             attrs["co2"] = co2
+            # Text form with unit, as the PyLoxone fork exposed it; dashboards built against it show this.
+            attrs["co2_with_unit"] = f"{co2} ppm"
         co2_target = self._positive_value("co2Target", 10000)
         if co2_target is not None:
             attrs["co2_target"] = co2_target
@@ -511,6 +513,27 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         except (TypeError, ValueError):
             return None
         return value if 0 < value <= maximum else None
+
+    def _protection_limits(self) -> tuple[float, float] | None:
+        """Frost/heat protection temperatures as (low, high), or None if missing or no usable range."""
+        try:
+            low = float(self.get_state_value("frostProtectTemperature"))
+            high = float(self.get_state_value("heatProtectTemperature"))
+        except (TypeError, ValueError):
+            return None
+        return (low, high) if low < high else None
+
+    @property
+    def min_temp(self) -> float:
+        """Lowest settable temperature: the controller's frost protection temperature."""
+        limits = self._protection_limits()
+        return limits[0] if limits else super().min_temp
+
+    @property
+    def max_temp(self) -> float:
+        """Highest settable temperature: the controller's heat protection temperature."""
+        limits = self._protection_limits()
+        return limits[1] if limits else super().max_temp
 
     @property
     def is_overridden(self) -> bool:
