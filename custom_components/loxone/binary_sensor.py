@@ -21,7 +21,7 @@ from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from . import LoxoneEntity
 from .const import CONF_ACTIONID, DOMAIN, SENDDOMAIN
-from .helpers import (add_room_and_cat_to_value_values, get_all,
+from .helpers import (add_room_and_cat_to_value_values, control_device_info, get_all,
                       get_or_create_device)
 from .miniserver import get_miniserver_from_hass
 from .window_monitor import LoxoneWindowContactSensor, window_contacts
@@ -33,7 +33,14 @@ DEFAULT_NAME = "Loxone Binary Sensor"
 LOXONE_DEVICE_CLASS_MAP: dict[str, BinarySensorDeviceClass] = {
     "presence": BinarySensorDeviceClass.PRESENCE,
     "smoke": BinarySensorDeviceClass.SMOKE,
+    "problem": BinarySensorDeviceClass.PROBLEM,
 }
+
+# SolarPumpController flags that become binary sensors: (state, name suffix, type).
+SOLAR_PUMP_FLAGS = (
+    ("heatOverload", "Heat Overload", "problem"),
+    ("logicOverride", "Logic Override", "override"),
+)
 
 
 async def async_setup_platform(
@@ -80,6 +87,14 @@ async def async_setup_entry(
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
         sensor.update({"type": "smoke"})
         entities.append(LoxoneDigitalSensor(**sensor))
+
+    for solar in get_all(loxconfig, "SolarPumpController"):
+        solar = add_room_and_cat_to_value_values(loxconfig, solar)
+        entities.extend(
+            LoxoneControlFlagSensor(solar, state_key, name_suffix, flag_type)
+            for state_key, name_suffix, flag_type in SOLAR_PUMP_FLAGS
+            if state_key in solar.get("states", {})
+        )
 
     # #524: one window binary sensor per WindowMonitor contact (the lock
     # state is part of the contact's enum sensor, see window_monitor.py).
@@ -200,6 +215,20 @@ class LoxoneDigitalSensor(LoxoneEntity, BinarySensorEntity):
         if self._state == STATE_UNKNOWN:
             return None
         return self._state == self._on_state
+
+
+class LoxoneControlFlagSensor(LoxoneDigitalSensor):
+    """One boolean state of a control (e.g. a solar heat overload), grouped under the control's device."""
+
+    def __init__(self, control: dict, state_key: str, name_suffix: str, flag_type: str) -> None:
+        """Initialize from the control's structure entry and the state to follow."""
+        super().__init__(
+            name=f"{control['name']} {name_suffix}",
+            uuidAction=control["states"][state_key],
+            type=flag_type,
+            parent_id=control["uuidAction"],
+        )
+        self._attr_device_info = control_device_info(control)
 
 
 class LoxoneCustomBinarySensor(LoxoneEntity, BinarySensorEntity):

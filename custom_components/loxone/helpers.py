@@ -8,6 +8,8 @@ https://home-assistant.io/components/loxone/
 import json
 import re
 
+from homeassistant.helpers.device_registry import DeviceInfo
+
 from .const import DOMAIN, cfmt
 
 _COLOR_RE = re.compile(r"^\s*(hsv|temp)\s*\(([^()]*)\)\s*$")
@@ -195,6 +197,27 @@ def get_all(json_data, name):
             if json_data["controls"][c]["type"] == name:
                 controls.append(json_data["controls"][c])
     return controls
+
+
+def get_sub_controls(json_data: dict, parent_type: str, sub_type: str) -> list[dict]:
+    """Return the sub-controls of type ``sub_type`` inside all controls of type ``parent_type``."""
+    return [
+        sub
+        for parent in get_all(json_data, parent_type)
+        for sub in parent.get("subControls", {}).values()
+        if sub.get("type") == sub_type
+    ]
+
+
+def control_device_info(control: dict) -> DeviceInfo:
+    """Return the device for a control whose values are split into several entities."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, control["uuidAction"])},
+        name=control["name"],
+        manufacturer="Loxone",
+        model=control["type"],
+        suggested_area=control.get("room") or None,
+    )
 
 
 def clean_unit(lox_format):

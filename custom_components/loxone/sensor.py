@@ -9,6 +9,7 @@ import json
 import logging
 import re
 from functools import cached_property
+from collections.abc import Callable
 from typing import Any
 
 import homeassistant.helpers.config_validation as cv
@@ -33,14 +34,22 @@ from homeassistant.util import dt as dt_util
 
 from . import LoxoneEntity, MiniServer
 from .const import CLIMATE_EVENT, CONF_ACTIONID, DOMAIN, EVENT, SENDDOMAIN, THROTTLE_KEEP_ALIVE_TIME
-from .helpers import (add_room_and_cat_to_value_values, clean_unit, get_all,
-                      get_or_create_device)
+from .helpers import (add_room_and_cat_to_value_values, clean_unit, control_device_info, get_all,
+                      get_or_create_device, get_sub_controls)
 from .miniserver import get_miniserver_from_hass
 from .window_monitor import (LoxoneWindowPositionSensor,
                              window_contacts, window_monitor_controls,
                              window_monitor_count_sensors)
 
 NEW_SENSOR = "sensors"
+
+# EFM states that become sensors: (state, name suffix, format detail).
+EFM_VALUES = (
+    ("selfConsumption", "Self Consumption", "actualFormat"),
+    ("storageChargeFromProduction", "Storage Charge From Production", "actualFormat"),
+    ("totalSelfConsumption", "Total Self Consumption", "totalFormat"),
+    ("totalStorageChargeFromProduction", "Total Storage Charge From Production", "totalFormat"),
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -248,7 +257,25 @@ async def async_setup_entry(
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
         entities.append(LoxoneTextStateSensor(**sensor))
 
-    for sensor in get_all(loxconfig, "Meter"):
+    def state_sensor(
+        control: dict, state_key: str, name_suffix: str, lox_format: str, device_info: DeviceInfo
+    ) -> LoxoneMeterSensor:
+        """One state of a control as its own sensor, grouped under the control's device."""
+        return LoxoneMeterSensor(
+            device_info=device_info,
+            parent_id=control["uuidAction"],
+            uuidAction=control["states"][state_key],
+            type="analog",
+            room=control.get("room", ""),
+            cat=control.get("cat", ""),
+            name=f"{control['name']} {name_suffix}",
+            details={"format": lox_format},
+            async_add_devices=async_add_entities,
+            config_entry=config_entry,
+        )
+
+    # The EFM (energy flow monitor) carries the house's rest consumption as an inner Meter.
+    for sensor in [*get_all(loxconfig, "Meter"), *get_sub_controls(loxconfig, "EFM", "Meter")]:
         _LOGGER.debug("Found Meter: %s", sensor)
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
         device_info = LoxoneMeterSensor.create_device_info_from_sensor(sensor)
@@ -263,21 +290,10 @@ async def async_setup_entry(
             ("storage", "Level", "storageFormat"),
         ]:
             if state_key in sensor["states"]:
-                subsensor = {
-                    "device_info": device_info,
-                    "parent_id": sensor["uuidAction"],
-                    "uuidAction": sensor["states"][state_key],
-                    "type": "analog",
-                    "room": sensor.get("room", ""),
-                    "cat": sensor.get("cat", ""),
-                    "name": f"{sensor['name']} {name_suffix}",
-                    "details": {"format": sensor["details"].get(
-                        format_key, sensor["details"].get("totalFormat"))
-                    },
-                    "async_add_devices": async_add_entities,
-                    "config_entry": config_entry,
-                }
-                entities.append(LoxoneMeterSensor(**subsensor))
+                lox_format = sensor["details"].get(format_key, sensor["details"].get("totalFormat"))
+                entities.append(state_sensor(sensor, state_key, name_suffix, lox_format, device_info))
+
+    entities.extend(_control_value_sensors(loxconfig, state_sensor))
 
     # Climate controller demand sensors
     for ctrl_type in ("ClimateController", "ClimateControllerUS"):
@@ -790,3 +806,48 @@ class LoxoneClimateController(LoxoneEntity, SensorEntity):
             "cool_demand": self._cool_demand,
             "device_type": self.type,
         }
+
+
+# Defined after LoxoneMeterSensor: the annotations reference it (evaluated eagerly before Python 3.14).
+def _control_value_sensors(loxconfig: dict, state_sensor: Callable[..., LoxoneMeterSensor]) -> list[LoxoneMeterSensor]:
+    """Return sensors for the values of EFM, Heatmixer and SolarPumpController controls."""
+    sensors: list[LoxoneMeterSensor] = []
+    # EFM: only the flows no Meter control provides (grid/production/storage power are Meters).
+    for raw_efm in get_all(loxconfig, "EFM"):
+        efm = add_room_and_cat_to_value_values(loxconfig, raw_efm)
+        device_info = control_device_info(efm)
+        for state_key, name_suffix, format_key in EFM_VALUES:
+            if state_key in efm["states"]:
+                lox_format = efm.get("details", {}).get(format_key, "%.2f")
+                sensors.append(state_sensor(efm, state_key, name_suffix, lox_format, device_info))
+
+    temperature_format = (
+        f"%.1f{UnitOfTemperature.FAHRENHEIT}"
+        if loxconfig.get("msInfo", {}).get("tempUnit") == 1
+        else f"%.1f{UnitOfTemperature.CELSIUS}"
+    )
+    for raw_mixer in get_all(loxconfig, "Heatmixer"):
+        mixer = add_room_and_cat_to_value_values(loxconfig, raw_mixer)
+        device_info = control_device_info(mixer)
+        for state_key, name_suffix in (("tempActual", "Actual"), ("tempTarget", "Target")):
+            if state_key in mixer["states"]:
+                sensors.append(state_sensor(mixer, state_key, name_suffix, temperature_format, device_info))
+
+    for raw_solar in get_all(loxconfig, "SolarPumpController"):
+        solar = add_room_and_cat_to_value_values(loxconfig, raw_solar)
+        device_info = control_device_info(solar)
+        if "collectorTemp" in solar["states"]:
+            sensors.append(state_sensor(solar, "collectorTemp", "Collector", temperature_format, device_info))
+        buffers = solar.get("details", {}).get("buffers", [])
+        index = 0
+        while f"bufferTemp{index}" in solar["states"]:
+            buffer_name = buffers[index].get("name") if index < len(buffers) else None
+            buffer_name = buffer_name or f"Buffer {index + 1}"
+            sensors.append(
+                state_sensor(solar, f"bufferTemp{index}", f"{buffer_name} Temperature", temperature_format, device_info)
+            )
+            if f"bufferState{index}" in solar["states"]:
+                # Raw buffer state number; its meaning is not documented in the structure file.
+                sensors.append(state_sensor(solar, f"bufferState{index}", f"{buffer_name} State", "%.0f", device_info))
+            index += 1
+    return sensors
