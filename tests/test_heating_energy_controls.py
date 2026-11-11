@@ -79,33 +79,12 @@ STRUCTURE = {
 }
 
 
-def _setup(module, loxconfig: dict, monkeypatch) -> list:
-    """Run a platform's async_setup_entry against a faked Miniserver."""
-    miniserver = SimpleNamespace(
-        lox_config=SimpleNamespace(json=loxconfig),
-        serial="12345678",
-        listeners=[],
-        async_signal_new_device=lambda new_type: "loxone-new-device",
-    )
-    monkeypatch.setattr(module, "get_miniserver_from_hass", lambda hass, config_entry: miniserver)
-    created: list = []
-    asyncio.run(
-        module.async_setup_entry(
-            hass=SimpleNamespace(data={}),
-            config_entry=SimpleNamespace(),
-            async_add_entities=lambda es, update_before_add=False: created.extend(es),
-        )
-    )
-    return created
+def _by_unique_id(platform_entities, module, loxconfig=None) -> dict:
+    return {e.unique_id: e for e in platform_entities(module, loxconfig or STRUCTURE)}
 
 
-def _by_unique_id(module, monkeypatch, loxconfig=None) -> dict:
-    entities = _setup(module, copy.deepcopy(loxconfig or STRUCTURE), monkeypatch)
-    return {e.unique_id: e for e in entities}
-
-
-def test_efm_inner_meter_becomes_meter_sensors(monkeypatch):
-    sensors = _by_unique_id(sensor_module, monkeypatch)
+def test_efm_inner_meter_becomes_meter_sensors(platform_entities):
+    sensors = _by_unique_id(platform_entities, sensor_module)
 
     assert sensors["haus-actual"]._attr_name == "Haus Actual"
     assert sensors["haus-total"]._attr_name == "Haus Total"
@@ -113,8 +92,8 @@ def test_efm_inner_meter_becomes_meter_sensors(monkeypatch):
     assert sensors["haus-actual"].device_class == SensorDeviceClass.POWER
 
 
-def test_efm_flow_values(monkeypatch):
-    sensors = _by_unique_id(sensor_module, monkeypatch)
+def test_efm_flow_values(platform_entities):
+    sensors = _by_unique_id(platform_entities, sensor_module)
 
     expected = {
         "efm-self": ("Energiefluss Self Consumption", "kW", SensorDeviceClass.POWER),
@@ -133,8 +112,8 @@ def test_efm_flow_values(monkeypatch):
     assert "efm-ppwr" not in sensors
 
 
-def test_heatmixer_actual_and_target_temperature(monkeypatch):
-    sensors = _by_unique_id(sensor_module, monkeypatch)
+def test_heatmixer_actual_and_target_temperature(platform_entities):
+    sensors = _by_unique_id(platform_entities, sensor_module)
 
     actual, target = sensors["mixer-actual"], sensors["mixer-target"]
     assert actual._attr_name == "HK EG Mischer Actual"
@@ -144,18 +123,18 @@ def test_heatmixer_actual_and_target_temperature(monkeypatch):
     assert "mixer-locked" not in sensors
 
 
-def test_temperatures_follow_the_miniserver_unit(monkeypatch):
+def test_temperatures_follow_the_miniserver_unit(platform_entities):
     loxconfig = copy.deepcopy(STRUCTURE)
     loxconfig["msInfo"]["tempUnit"] = 1
 
-    sensors = _by_unique_id(sensor_module, monkeypatch, loxconfig)
+    sensors = _by_unique_id(platform_entities, sensor_module, loxconfig)
 
     assert sensors["mixer-actual"].native_unit_of_measurement == "°F"
     assert sensors["solar-collector"].native_unit_of_measurement == "°F"
 
 
-def test_solar_collector_and_buffers(monkeypatch):
-    sensors = _by_unique_id(sensor_module, monkeypatch)
+def test_solar_collector_and_buffers(platform_entities):
+    sensors = _by_unique_id(platform_entities, sensor_module)
 
     assert sensors["solar-collector"]._attr_name == "Solarregelung Collector"
     assert sensors["solar-temp0"]._attr_name == "Solarregelung Warmwasserspeicher Temperature"
@@ -168,8 +147,8 @@ def test_solar_collector_and_buffers(monkeypatch):
     assert not sensors["solar-state0"].native_unit_of_measurement
 
 
-def test_values_of_one_control_share_its_device(monkeypatch):
-    sensors = _by_unique_id(sensor_module, monkeypatch)
+def test_values_of_one_control_share_its_device(platform_entities):
+    sensors = _by_unique_id(platform_entities, sensor_module)
 
     for uid in ("mixer-actual", "mixer-target"):
         info = sensors[uid].device_info
@@ -179,8 +158,8 @@ def test_values_of_one_control_share_its_device(monkeypatch):
         assert info["suggested_area"] == "Heizraum"
 
 
-def test_value_follows_its_state_event(monkeypatch):
-    sensor = _by_unique_id(sensor_module, monkeypatch)["mixer-actual"]
+def test_value_follows_its_state_event(platform_entities):
+    sensor = _by_unique_id(platform_entities, sensor_module)["mixer-actual"]
     sensor.async_schedule_update_ha_state = lambda *_: None
 
     asyncio.run(sensor.event_handler(SimpleNamespace(data={"mixer-actual": 41.5, "mixer-target": 45.0})))
@@ -188,18 +167,18 @@ def test_value_follows_its_state_event(monkeypatch):
     assert sensor.native_value == 41.5
 
 
-def test_missing_states_create_no_entities(monkeypatch):
+def test_missing_states_create_no_entities(platform_entities):
     loxconfig = copy.deepcopy(STRUCTURE)
     loxconfig["controls"]["mixer-uuid"]["states"] = {}
     loxconfig["controls"]["efm-uuid"]["states"] = {}
 
-    sensors = _by_unique_id(sensor_module, monkeypatch, loxconfig)
+    sensors = _by_unique_id(platform_entities, sensor_module, loxconfig)
 
     assert not any(uid.startswith(("mixer-", "efm-")) for uid in sensors)
 
 
-def test_solar_flags_are_binary_sensors(monkeypatch):
-    flags = _by_unique_id(binary_sensor_module, monkeypatch)
+def test_solar_flags_are_binary_sensors(platform_entities):
+    flags = _by_unique_id(platform_entities, binary_sensor_module)
 
     overload, override = flags["solar-overload"], flags["solar-override"]
     assert overload._attr_name == "Solarregelung Heat Overload"
@@ -209,8 +188,8 @@ def test_solar_flags_are_binary_sensors(monkeypatch):
 
 
 @pytest.mark.parametrize(("value", "expected"), [(1.0, True), (0.0, False)])
-def test_solar_flag_follows_its_state(monkeypatch, value, expected):
-    overload = _by_unique_id(binary_sensor_module, monkeypatch)["solar-overload"]
+def test_solar_flag_follows_its_state(platform_entities, value, expected):
+    overload = _by_unique_id(platform_entities, binary_sensor_module)["solar-overload"]
     overload.async_schedule_update_ha_state = lambda *_: None
 
     asyncio.run(overload.event_handler(SimpleNamespace(data={"solar-overload": value})))

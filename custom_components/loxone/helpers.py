@@ -172,6 +172,16 @@ def add_room_and_cat_to_value_values(loxconfig: dict, sensor: dict):
     return sensor
 
 
+def with_room_and_cat(loxconfig: dict, control: dict) -> dict:
+    """Return a copy of ``control`` with room and category names instead of uuids.
+
+    Unlike ``add_room_and_cat_to_value_values`` it leaves the shared structure file
+    untouched: mapping the same control a second time (another platform) would turn
+    the already mapped name into "" because it is no room uuid.
+    """
+    return add_room_and_cat_to_value_values(loxconfig, dict(control))
+
+
 def get_miniserver_type(t):
     if t == 0:
         return "Miniserver (Gen 1)"

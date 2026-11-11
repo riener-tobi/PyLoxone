@@ -20,9 +20,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from . import LoxoneEntity
-from .const import CONF_ACTIONID, DOMAIN, SENDDOMAIN
+from .const import CONF_ACTIONID, DOMAIN, SENDDOMAIN, VENTILATION_VALUE_STATES
 from .helpers import (add_room_and_cat_to_value_values, control_device_info, get_all,
-                      get_or_create_device)
+                      get_or_create_device, with_room_and_cat)
 from .miniserver import get_miniserver_from_hass
 from .window_monitor import LoxoneWindowContactSensor, window_contacts
 
@@ -34,6 +34,7 @@ LOXONE_DEVICE_CLASS_MAP: dict[str, BinarySensorDeviceClass] = {
     "presence": BinarySensorDeviceClass.PRESENCE,
     "smoke": BinarySensorDeviceClass.SMOKE,
     "problem": BinarySensorDeviceClass.PROBLEM,
+    "connectivity": BinarySensorDeviceClass.CONNECTIVITY,
 }
 
 # SolarPumpController flags that become binary sensors: (state, name suffix, type).
@@ -88,8 +89,17 @@ async def async_setup_entry(
         sensor.update({"type": "smoke"})
         entities.append(LoxoneDigitalSensor(**sensor))
 
-    for solar in get_all(loxconfig, "SolarPumpController"):
-        solar = add_room_and_cat_to_value_values(loxconfig, solar)
+    internet_uuid = loxconfig.get("globalStates", {}).get("hasInternet")
+    if internet_uuid:
+        entities.append(LoxoneDigitalSensor(name="Loxone Internet", uuidAction=internet_uuid, type="connectivity"))
+
+    for raw_vent in get_all(loxconfig, "Ventilation"):
+        vent = with_room_and_cat(loxconfig, raw_vent)
+        if vent.get("details", {}).get(VENTILATION_VALUE_STATES["presence"]) and "presence" in vent.get("states", {}):
+            entities.append(LoxoneControlFlagSensor(vent, "presence", "Presence", "presence"))
+
+    for raw_solar in get_all(loxconfig, "SolarPumpController"):
+        solar = with_room_and_cat(loxconfig, raw_solar)
         entities.extend(
             LoxoneControlFlagSensor(solar, state_key, name_suffix, flag_type)
             for state_key, name_suffix, flag_type in SOLAR_PUMP_FLAGS

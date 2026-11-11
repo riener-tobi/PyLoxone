@@ -25,7 +25,17 @@ LOXONE_PLATFORMS: Final[list[Platform]] = [
     Platform.SCENE,
     Platform.SELECT,
     Platform.TEXT,
+    Platform.WEATHER,
 ]
+
+# Ventilation states that become their own sensors / binary sensors:
+# state key -> details flag that must be true (None: always, if the state exists).
+VENTILATION_VALUE_STATES: Final[dict[str, str | None]] = {
+    "presence": "hasPresence",
+    "humidityIndoor": "hasIndoorHumidity",
+    "airQualityIndoor": "hasAirQuality",
+    "temperatureOutdoor": None,
+}
 
 LOXONE_DEFAULT_PORT = 8080
 

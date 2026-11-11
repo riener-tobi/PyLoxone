@@ -166,3 +166,33 @@ def setup_loxone_entry(hass):
         return entry
 
     return _setup
+
+
+@pytest.fixture
+def platform_entities(monkeypatch):
+    """``platform_entities(module, loxconfig)`` runs a platform's ``async_setup_entry``
+    against a faked Miniserver serving ``loxconfig`` and returns the created entities.
+
+    Lighter than the harness fixtures above: no Home Assistant instance, for tests that
+    only look at which entities a structure file produces.
+    """
+
+    def _run(module, loxconfig: dict) -> list:
+        miniserver = SimpleNamespace(
+            lox_config=SimpleNamespace(json=copy.deepcopy(loxconfig)),
+            serial="12345678",
+            listeners=[],
+            async_signal_new_device=lambda new_type: "loxone-new-device",
+        )
+        monkeypatch.setattr(module, "get_miniserver_from_hass", lambda hass, config_entry: miniserver)
+        created: list = []
+        asyncio.run(
+            module.async_setup_entry(
+                hass=SimpleNamespace(data={}),
+                config_entry=SimpleNamespace(entry_id="entry-1"),
+                async_add_entities=lambda es, update_before_add=False: created.extend(es),
+            )
+        )
+        return created
+
+    return _run
