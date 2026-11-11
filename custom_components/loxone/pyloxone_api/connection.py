@@ -135,6 +135,16 @@ _CALLBACK_TASK_NAMES: dict = {mtype: f"loxone.callback-{mtype.name}" for mtype i
 # added here, or it would silently never run.
 _EVENT_HANDLED_TYPES: frozenset = frozenset({MessageType.TEXT})
 
+# Message types handed to the integration's callback (state updates for the entities).
+CALLBACK_MESSAGE_TYPES: frozenset = frozenset({
+    MessageType.VALUE_STATES,
+    MessageType.TEXT_STATES,
+    MessageType.DAYTIMER_STATES,
+    MessageType.WEATHER_STATES,
+    MessageType.TEXT,
+    MessageType.KEEPALIVE,
+})
+
 
 def time_elapsed_in_seconds():
     return int(round(time.time()))
@@ -1922,13 +1932,7 @@ class LoxoneConnection(LoxoneBaseConnection):
             mistaken for the next header. Dispatch as soon as
             ``len(body_buffer) >= payload_length``.
         """
-        # Set for O(1) membership tests on the external callback.
-        callback_types = {
-            MessageType.VALUE_STATES,
-            MessageType.TEXT_STATES,
-            MessageType.TEXT,
-            MessageType.KEEPALIVE,
-        }
+        callback_types = CALLBACK_MESSAGE_TYPES
 
         last_header: Optional[MessageHeader] = None
         body_buffer = bytearray()

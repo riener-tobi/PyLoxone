@@ -350,12 +350,65 @@ class TextStatesTable(BaseMessage):
         return event_dict
 
 
+# DAYTIMER_STATES record (little endian):
+#     PUUID uuid; double dDefValue; int nrEntries;
+#     then nrEntries x { int nMode; int nFrom; int nTo; int bNeedActivate; double dValue; }
+_DAYTIMER_HEADER = struct.Struct("<di")
+_DAYTIMER_ENTRY = struct.Struct("<iiiid")
+
+# WEATHER_STATES record (little endian):
+#     PUUID uuid; unsigned int lastUpdate; int nrEntries;
+#     then nrEntries x { int timestamp; int weatherType; int windDirection; int solarRadiation;
+#                        int relativeHumidity; double temperature; double perceivedTemperature;
+#                        double dewPoint; double precipitation; double windSpeed;
+#                        double barometicPressure; }
+_WEATHER_HEADER = struct.Struct("<Ii")
+_WEATHER_ENTRY = struct.Struct("<iiiiidddddd")
+_WEATHER_FIELDS = (
+    "timestamp", "weather_type", "wind_direction", "solar_radiation", "relative_humidity",
+    "temperature", "perceived_temperature", "dew_point", "precipitation", "wind_speed",
+    "barometric_pressure",
+)
+
+
+def _require_bytes(message: bytes | str) -> bytes:
+    if not isinstance(message, bytes):
+        msg = "Expected bytes table, got str"
+        raise LoxoneException(msg)
+    return message
+
+
 class DaytimerStatesTable(BaseMessage):
     message_type = MessageType.DAYTIMER_STATES
 
-    # We dont currently handle this.
-    def as_dict(self):
-        return {}
+    def as_dict(self) -> dict:
+        """
+        Return ``{uuid: {"default_value": float, "entries": [...]}}`` per daytimer.
+
+        A truncated record raises ``struct.error`` (like the text table) instead of
+        yielding a partial schedule.
+        """
+        message = _require_bytes(self.message)
+        event_dict = {}
+        start = 0
+        while start < len(message):
+            key = _uuid_str(message[start : start + _UUID_BYTES_LEN])
+            start += _UUID_BYTES_LEN
+            default_value, count = _DAYTIMER_HEADER.unpack_from(message, start)
+            start += _DAYTIMER_HEADER.size
+            entries = []
+            for _ in range(count):
+                mode, minute_from, minute_to, needs_activation, value = _DAYTIMER_ENTRY.unpack_from(message, start)
+                start += _DAYTIMER_ENTRY.size
+                entries.append({
+                    "mode": mode,
+                    "from": minute_from,
+                    "to": minute_to,
+                    "needs_activation": bool(needs_activation),
+                    "value": value,
+                })
+            event_dict[key] = {"default_value": default_value, "entries": entries}
+        return event_dict
 
 
 class OutOfServiceIndicator(BaseMessage):
@@ -375,8 +428,27 @@ class Keepalive(BaseMessage):
 class WeatherStatesTable(BaseMessage):
     message_type = MessageType.WEATHER_STATES
 
-    def as_dict(self):
-        return {}
+    def as_dict(self) -> dict:
+        """
+        Return ``{uuid: {"last_update": int, "entries": [...]}}`` per weather state.
+
+        Timestamps are Loxone time (seconds since 2009-01-01). A truncated record
+        raises ``struct.error``.
+        """
+        message = _require_bytes(self.message)
+        event_dict = {}
+        start = 0
+        while start < len(message):
+            key = _uuid_str(message[start : start + _UUID_BYTES_LEN])
+            start += _UUID_BYTES_LEN
+            last_update, count = _WEATHER_HEADER.unpack_from(message, start)
+            start += _WEATHER_HEADER.size
+            entries = []
+            for _ in range(count):
+                entries.append(dict(zip(_WEATHER_FIELDS, _WEATHER_ENTRY.unpack_from(message, start), strict=True)))
+                start += _WEATHER_ENTRY.size
+            event_dict[key] = {"last_update": last_update, "entries": entries}
+        return event_dict
 
 
 def parse_header(header: bytes) -> MessageHeader:
