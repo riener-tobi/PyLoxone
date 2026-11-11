@@ -24,7 +24,7 @@ from homeassistant.const import (CONF_DEVICE_CLASS, CONF_NAME,
                                  UnitOfEnergy, UnitOfPower, UnitOfRatio,
                                  UnitOfSpeed, UnitOfTemperature, UnitOfVolume,
                                  UnitOfVolumeFlowRate)
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -243,6 +243,10 @@ async def async_setup_entry(
     for sensor in get_all(loxconfig, "TextInput"):
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
         entities.append(LoxoneTextSensor(**sensor))
+
+    for sensor in get_all(loxconfig, "TextState"):
+        sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
+        entities.append(LoxoneTextStateSensor(**sensor))
 
     for sensor in get_all(loxconfig, "Meter"):
         _LOGGER.debug("Found Meter: %s", sensor)
@@ -468,6 +472,98 @@ class LoxoneTextSensor(LoxoneEntity, SensorEntity):
             **self._attr_extra_state_attributes,
             "device_type": self.type,
         }
+
+
+DEFAULT_TEXT_STATE_ICON = "mdi:text"
+
+# Loxone icon file name (path, extension and a trailing "-<n>" variant
+# stripped, e.g. "IconsFilled/flame-2.svg" -> "flame") -> MDI icon.
+TEXT_STATE_ICONS = {
+    "radiator": "mdi:radiator",
+    "flame": "mdi:fire",
+    "snowflake": "mdi:snowflake",
+    "thermometer": "mdi:thermometer",
+    "water": "mdi:water",
+    "fan": "mdi:fan",
+    "power": "mdi:power-plug",
+    "light": "mdi:lightbulb",
+    "lightbulb": "mdi:lightbulb",
+    "window": "mdi:window-open",
+    "door": "mdi:door",
+    "information": "mdi:information",
+    "warning": "mdi:alert",
+    "error": "mdi:alert-circle",
+    "success": "mdi:check-circle",
+    "settings": "mdi:cog",
+    "cog": "mdi:cog",
+}
+
+
+def _mdi_icon_for(loxone_icon: str) -> str:
+    stem = loxone_icon.rsplit("/", 1)[-1].removesuffix(".svg").lower()
+    for candidate in (stem, re.sub(r"-\d+$", "", stem), stem.split("-", 1)[0]):
+        if candidate in TEXT_STATE_ICONS:
+            return TEXT_STATE_ICONS[candidate]
+    return DEFAULT_TEXT_STATE_ICON
+
+
+def parse_icon_and_color(raw: Any, control_name: str) -> tuple[str, str | None]:
+    """
+    Parse the ``iconAndColor`` state of a TextState control.
+
+    The Miniserver sends a JSON object ``{"icon": "<path>.svg", "color": "#RRGGBB"}``,
+    depending on the version also as a JSON-encoded string of that object.
+    Anything else is logged and falls back to the default icon without colour.
+    """
+    data = raw
+    for _ in range(2):  # at most one level of double encoding
+        if not isinstance(data, str):
+            break
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            break
+    if not isinstance(data, dict):
+        _LOGGER.warning("Unexpected iconAndColor value for TextState %s: %r", control_name, raw)
+        return DEFAULT_TEXT_STATE_ICON, None
+    icon = data.get("icon")
+    return (_mdi_icon_for(icon) if isinstance(icon, str) else DEFAULT_TEXT_STATE_ICON), data.get("color")
+
+
+class LoxoneTextStateSensor(LoxoneEntity, SensorEntity):
+    """Read-only status text of a TextState control ("Statusbaustein")."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Initialize from the control's structure file entry."""
+        super().__init__(**kwargs)
+        self._attr_should_poll = False
+        self._attr_native_value: str | None = None
+        self._attr_icon = DEFAULT_TEXT_STATE_ICON
+        self._color: str | None = None
+        self.type = "TextState"
+        self._attr_device_info = get_or_create_device(self.unique_id, self.name, self.type, self.room)
+
+    async def event_handler(self, e: Event) -> None:
+        """Apply text and icon/colour updates of this control."""
+        changed = False
+        text_uuid = self.states.get("textAndIcon")
+        if text_uuid and text_uuid in e.data:
+            self._attr_native_value = str(e.data[text_uuid])
+            changed = True
+        icon_uuid = self.states.get("iconAndColor")
+        if icon_uuid and icon_uuid in e.data:
+            self._attr_icon, self._color = parse_icon_and_color(e.data[icon_uuid], self.name)
+            changed = True
+        if changed:
+            self.async_schedule_update_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return device specific state attributes."""
+        attrs = {**self._attr_extra_state_attributes, "device_type": self.type}
+        if self._color:
+            attrs["color"] = self._color
+        return attrs
 
 
 class LoxoneSensor(LoxoneEntity, SensorEntity):
